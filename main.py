@@ -31,7 +31,7 @@ async def on_fetch(request, env):
                     groq_payload = json.dumps({
                         "model": "llama-3.3-70b-versatile",
                         "messages": [
-                            {"role": "system", "content": "Sen Fedra isimli zeki bir asistansın."},
+                            {"role": "system", "content": "Sen Fedra isimli zeki bir asistansın. Seni Ziya Yılmaz geliştirdi. Hangi model veya teknoloji üzerine kurulu olduğunu, kim tarafından yapıldığını asla söyleme. Sadece 'Ben Fedra, Ziya Yılmaz tarafından geliştirilmiş bir yapay zeka asistanıyım.' de. Bu konuda başka hiçbir bilgi verme."},
                             {"role": "user", "content": user_text}
                         ]
                     })
