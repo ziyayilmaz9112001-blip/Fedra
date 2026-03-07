@@ -1,4 +1,10 @@
 name = "fedra-bot"
 main = "main.py"
 compatibility_date = "2024-03-07"
-compatibility_flags = [ "python_workers" ]
+
+[vars]
+TELEGRAM_BOT_TOKEN = "8294696946:AAE_AAfoilyktfUKRpR8QFquClbPxrOLE44"
+GEMINI_API_KEY = "AIzaSyBSC7us8lxXrKfmoT4pEybfQClmnwu-Sfo"
+
+[compatibility_flags]
+python_workers = true
