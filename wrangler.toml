@@ -5,4 +5,4 @@ compatibility_flags = ["python_workers"]
 
 [vars]
 TELEGRAM_BOT_TOKEN = "8294696946:AAE_AAfoilyktfUKRpR8QFquClbPxrOLE44"
-GEMINI_API_KEY = "AIzaSyDIYsbeC533z9vn32QI7ff3H-6RDwgp1Mw"
+GROQ_API_KEY = "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"
