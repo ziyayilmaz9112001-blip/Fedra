@@ -29,7 +29,7 @@ async def on_fetch(request, env):
                     print(f"DEBUG: chat_id={chat_id}, text={user_text}")
 
                     groq_payload = json.dumps({
-                        "model": "llama3-70b-8192",
+                        "model": "llama-3.3-70b-versatile",
                         "messages": [
                             {"role": "system", "content": "Sen Fedra isimli zeki bir asistansın."},
                             {"role": "user", "content": user_text}
