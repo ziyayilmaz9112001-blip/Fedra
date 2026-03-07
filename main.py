@@ -30,3 +30,4 @@ async def on_fetch(request, env):
             
     return Response.new("Fedra Python ile GitHub üzerinden yayında!", status=200)
 # test
+# aktif
