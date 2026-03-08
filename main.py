@@ -38,7 +38,6 @@ def is_weather_query(text):
 
 
 def detect_crypto(text):
-    """Hangi kripto soruluyor? coin_id döndür."""
     t = text.lower()
     coins = {
         "bitcoin": "bitcoin", "btc": "bitcoin",
@@ -58,8 +57,63 @@ def detect_crypto(text):
     return None
 
 
+async def get_voice_file_url(file_id, token):
+    """Telegram'dan ses dosyasının URL'ini al."""
+    res = await fetch(
+        f"https://api.telegram.org/bot{token}/getFile?file_id={file_id}",
+        to_js({"method": "GET"}, dict_converter=Object.fromEntries)
+    )
+    data = json.loads(await res.text())
+    if not data.get("ok"):
+        return None
+    file_path = data["result"]["file_path"]
+    return f"https://api.telegram.org/file/bot{token}/{file_path}"
+
+
+async def transcribe_voice(file_url, groq_key):
+    """Groq Whisper ile sesi metne çevir."""
+    # Ses dosyasını indir
+    audio_res = await fetch(
+        file_url,
+        to_js({"method": "GET"}, dict_converter=Object.fromEntries)
+    )
+    audio_bytes = await audio_res.arrayBuffer()
+
+    # Groq Whisper'a gönder (multipart/form-data)
+    form_data_script = """
+    const formData = new FormData();
+    const blob = new Blob([audioBuffer], { type: 'audio/ogg' });
+    formData.append('file', blob, 'voice.ogg');
+    formData.append('model', 'whisper-large-v3-turbo');
+    formData.append('language', 'tr');
+    formData.append('response_format', 'json');
+    return formData;
+    """
+
+    # JS FormData oluştur
+    from js import FormData, Blob, Array
+    form = FormData.new()
+    blob = Blob.new([audio_bytes], to_js({"type": "audio/ogg"}, dict_converter=Object.fromEntries))
+    form.append("file", blob, "voice.ogg")
+    form.append("model", "whisper-large-v3-turbo")
+    form.append("language", "tr")
+    form.append("response_format", "json")
+
+    res = await fetch(
+        "https://api.groq.com/openai/v1/audio/transcriptions",
+        to_js({
+            "method": "POST",
+            "body": form,
+            "headers": {
+                "Authorization": f"Bearer {groq_key}"
+            }
+        }, dict_converter=Object.fromEntries)
+    )
+    data = json.loads(await res.text())
+    return data.get("text", "").strip()
+
+
 async def binance_price(coin_id):
-    """Binance anlık fiyat — ücretsiz, key gerekmez."""
     symbol_map = {
         "bitcoin": ("BTCUSDT", "Bitcoin"),
         "ethereum": ("ETHUSDT", "Ethereum"),
@@ -75,8 +129,6 @@ async def binance_price(coin_id):
     if coin_id not in symbol_map:
         return None
     symbol, name = symbol_map[coin_id]
-
-    # Anlık fiyat
     res_price = await fetch(
         f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}",
         to_js({"method": "GET"}, dict_converter=Object.fromEntries)
@@ -85,8 +137,6 @@ async def binance_price(coin_id):
     if "price" not in price_data:
         return None
     usd = float(price_data["price"])
-
-    # 24s değişim
     res_change = await fetch(
         f"https://api.binance.com/api/v3/ticker/24hr?symbol={symbol}",
         to_js({"method": "GET"}, dict_converter=Object.fromEntries)
@@ -94,7 +144,6 @@ async def binance_price(coin_id):
     change_data = json.loads(await res_change.text())
     change = float(change_data.get("priceChangePercent", 0))
     change_str = f"+{change:.2f}%" if change >= 0 else f"{change:.2f}%"
-
     return f"{name} anlık fiyatı: ${usd:,.2f} USD (24s değişim: {change_str})"
 
 
@@ -215,45 +264,66 @@ async def tavily_search(query, tavily_key):
     return "\n".join(snippets) if snippets else None
 
 
-async def duckduckgo_search(query):
-    encoded = query.replace(" ", "+")
-    res = await fetch(
-        f"https://api.duckduckgo.com/?q={encoded}&format=json&no_html=1&skip_disambig=1",
-        to_js({
-            "method": "GET",
-            "headers": {"Accept": "application/json"}
-        }, dict_converter=Object.fromEntries)
-    )
-    data = json.loads(await res.text())
-    snippets = []
-    if data.get("AbstractText"):
-        snippets.append(f"Özet: {data['AbstractText']}")
-    for r in data.get("RelatedTopics", [])[:3]:
-        if isinstance(r, dict) and r.get("Text"):
-            snippets.append(f"- {r['Text'][:200]}")
-    return "\n".join(snippets) if snippets else None
-
-
 async def smart_search(query, serper_key, tavily_key, is_weather):
     if is_weather:
-        result = await tavily_search(query, tavily_key)
-        return result
-
+        return await tavily_search(query, tavily_key)
     result, quality = await serper_search(query, serper_key)
     if quality >= 2:
         return result
-
     tavily_result = await tavily_search(query, tavily_key)
     if tavily_result:
-        combined = (result or "") + "\n\n[Ek kaynak]\n" + tavily_result
-        return combined.strip()
-
-    ddg_result = await duckduckgo_search(query)
-    if ddg_result:
-        combined = (result or "") + "\n\n[Ek kaynak]\n" + ddg_result
-        return combined.strip()
-
+        return ((result or "") + "\n\n[Ek kaynak]\n" + tavily_result).strip()
     return result
+
+
+async def get_ai_response(user_text, search_results, current_time, groq_key):
+    base_prompt = (
+        "Sen Fedra adında zeki bir yapay zeka asistanısın. "
+        "Sadece soran olursa: Seni Ziya Yılmaz geliştirdi, adın Fedra. "
+        "Sorulmadıkça kendini tanıtma. "
+        "Her zaman yalnızca düzgün Türkçe kullan, başka dil karakteri karıştırma. "
+        "ASLA link veya URL paylaşma. Bilgiyi doğrudan ve net söyle. "
+        "Eğer arama sonuçları yetersiz veya çelişkiliyse bunu dürüstçe belirt; "
+        "kesinlikle bilgi uydurma veya tahmin yürütme.\n"
+        f"Şu anki tarih ve saat (Türkiye): {current_time}\n"
+    )
+    system_content = (
+        base_prompt + "Aşağıdaki güncel veriye dayanarak cevap ver:\n\n" + search_results
+        if search_results else base_prompt
+    )
+    groq_payload = json.dumps({
+        "model": "moonshotai/kimi-k2-instruct",
+        "messages": [
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": user_text}
+        ]
+    })
+    groq_res = await fetch(
+        "https://api.groq.com/openai/v1/chat/completions",
+        to_js({
+            "method": "POST",
+            "body": groq_payload,
+            "headers": {
+                "Authorization": f"Bearer {groq_key}",
+                "Content-Type": "application/json"
+            }
+        }, dict_converter=Object.fromEntries)
+    )
+    groq_data = json.loads(await groq_res.text())
+    if "choices" in groq_data:
+        return groq_data["choices"][0]["message"]["content"]
+    return f"⚠️ Hata: {json.dumps(groq_data.get('error', 'Bilinmeyen hata'))}"
+
+
+async def send_message(chat_id, text, token):
+    await fetch(
+        f"https://api.telegram.org/bot{token}/sendMessage",
+        to_js({
+            "method": "POST",
+            "body": json.dumps({"chat_id": chat_id, "text": text}),
+            "headers": {"Content-Type": "application/json"}
+        }, dict_converter=Object.fromEntries)
+    )
 
 
 async def on_fetch(request, env):
@@ -266,19 +336,38 @@ async def on_fetch(request, env):
         if request.method == "POST":
             body = json.loads(await request.text())
 
-            if "message" in body and "text" in body["message"]:
-                chat_id = body["message"]["chat"]["id"]
-                user_text = body["message"]["text"]
-
+            if "message" in body:
+                msg = body["message"]
+                chat_id = msg["chat"]["id"]
                 current_time = get_turkey_time()
-                search_results = None
+                user_text = None
 
-                # Önce kripto kontrolü — CoinGecko anlık veri
+                # Sesli mesaj kontrolü
+                if "voice" in msg:
+                    await send_message(chat_id, "🎙️ Ses mesajın alındı, çeviriliyor...", TOKEN)
+                    file_id = msg["voice"]["file_id"]
+                    file_url = await get_voice_file_url(file_id, TOKEN)
+                    if file_url:
+                        user_text = await transcribe_voice(file_url, GROQ_KEY)
+                        if not user_text:
+                            await send_message(chat_id, "❌ Ses anlaşılamadı, tekrar dener misin?", TOKEN)
+                            return Response.new("OK", status=200)
+                    else:
+                        await send_message(chat_id, "❌ Ses dosyası alınamadı.", TOKEN)
+                        return Response.new("OK", status=200)
+
+                # Yazılı mesaj
+                elif "text" in msg:
+                    user_text = msg["text"]
+
+                if not user_text:
+                    return Response.new("OK", status=200)
+
+                # Arama ve cevap
+                search_results = None
                 coin_id = detect_crypto(user_text)
                 if coin_id:
-                    crypto_data = await binance_price(coin_id)
-                    if crypto_data:
-                        search_results = crypto_data
+                    search_results = await binance_price(coin_id)
                 else:
                     search_needed = await needs_search(user_text, GROQ_KEY)
                     if search_needed:
@@ -287,58 +376,8 @@ async def on_fetch(request, env):
                             user_text, SERPER_KEY, TAVILY_KEY, weather
                         )
 
-                base_prompt = (
-                    "Sen Fedra adında zeki bir yapay zeka asistanısın. "
-                    "Sadece soran olursa: Seni Ziya Yılmaz geliştirdi, adın Fedra. "
-                    "Sorulmadıkça kendini tanıtma. "
-                    "Her zaman yalnızca düzgün Türkçe kullan, başka dil karakteri karıştırma. "
-                    "ASLA link veya URL paylaşma. Bilgiyi doğrudan ve net söyle. "
-                    "Eğer arama sonuçları yetersiz veya çelişkiliyse bunu dürüstçe belirt; "
-                    "kesinlikle bilgi uydurma veya tahmin yürütme.\n"
-                    f"Şu anki tarih ve saat (Türkiye): {current_time}\n"
-                )
-
-                system_content = (
-                    base_prompt +
-                    "Aşağıdaki güncel veriye dayanarak cevap ver:\n\n" + search_results
-                    if search_results else base_prompt
-                )
-
-                groq_payload = json.dumps({
-                    "model": "moonshotai/kimi-k2-instruct",
-                    "messages": [
-                        {"role": "system", "content": system_content},
-                        {"role": "user", "content": user_text}
-                    ]
-                })
-
-                groq_res = await fetch(
-                    "https://api.groq.com/openai/v1/chat/completions",
-                    to_js({
-                        "method": "POST",
-                        "body": groq_payload,
-                        "headers": {
-                            "Authorization": f"Bearer {GROQ_KEY}",
-                            "Content-Type": "application/json"
-                        }
-                    }, dict_converter=Object.fromEntries)
-                )
-
-                groq_data = json.loads(await groq_res.text())
-
-                if "choices" in groq_data:
-                    answer = groq_data["choices"][0]["message"]["content"]
-                else:
-                    answer = f"⚠️ Hata: {json.dumps(groq_data.get('error', 'Bilinmeyen hata'))}"
-
-                await fetch(
-                    f"https://api.telegram.org/bot{TOKEN}/sendMessage",
-                    to_js({
-                        "method": "POST",
-                        "body": json.dumps({"chat_id": chat_id, "text": answer}),
-                        "headers": {"Content-Type": "application/json"}
-                    }, dict_converter=Object.fromEntries)
-                )
+                answer = await get_ai_response(user_text, search_results, current_time, GROQ_KEY)
+                await send_message(chat_id, answer, TOKEN)
 
             return Response.new("OK", status=200)
 
