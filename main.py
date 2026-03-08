@@ -71,32 +71,71 @@ async def get_voice_file_url(file_id, token):
 
 
 async def transcribe_voice(file_url, groq_key):
-    """Groq Whisper ile sesi metne çevir — URL üzerinden."""
-    # Ses dosyasını binary olarak indir
+    """Groq Whisper ile sesi metne çevir — manuel multipart."""
+    # Ses dosyasını indir
     audio_res = await fetch(
         file_url,
         to_js({"method": "GET"}, dict_converter=Object.fromEntries)
     )
     audio_bytes = await audio_res.arrayBuffer()
 
-    # JS tarafında FormData oluştur
-    from js import FormData, Blob
-    form = FormData.new()
-    blob = Blob.new(
-        [audio_bytes],
-        to_js({"type": "audio/ogg; codecs=opus"}, dict_converter=Object.fromEntries)
-    )
-    form.append("file", blob, "voice.ogg")
-    form.append("model", "whisper-large-v3-turbo")
-    form.append("language", "tr")
-    form.append("response_format", "json")
+    # Python'da Uint8Array'den bytes'a çevir
+    from js import Uint8Array
+    audio_uint8 = Uint8Array.new(audio_bytes)
+    audio_data = bytes(audio_uint8.to_py())
+
+    # Manuel multipart/form-data oluştur
+    boundary = "----GroqBoundary7MA4YWxkTrZu0gW"
+    body_parts = []
+    body_parts.append(f"--{boundary}
+".encode())
+    body_parts.append(b'Content-Disposition: form-data; name="file"; filename="voice.ogg"
+')
+    body_parts.append(b'Content-Type: audio/ogg
+
+')
+    body_parts.append(audio_data)
+    body_parts.append(f"
+--{boundary}
+".encode())
+    body_parts.append(b'Content-Disposition: form-data; name="model"
+
+')
+    body_parts.append(b'whisper-large-v3-turbo')
+    body_parts.append(f"
+--{boundary}
+".encode())
+    body_parts.append(b'Content-Disposition: form-data; name="language"
+
+')
+    body_parts.append(b'tr')
+    body_parts.append(f"
+--{boundary}
+".encode())
+    body_parts.append(b'Content-Disposition: form-data; name="response_format"
+
+')
+    body_parts.append(b'json')
+    body_parts.append(f"
+--{boundary}--
+".encode())
+    body = b"".join(body_parts)
+
+    # Uint8Array olarak gönder
+    from js import Uint8Array as JSUint8Array
+    js_body = JSUint8Array.new(len(body))
+    for i, byte in enumerate(body):
+        js_body[i] = byte
 
     res = await fetch(
         "https://api.groq.com/openai/v1/audio/transcriptions",
         to_js({
             "method": "POST",
-            "body": form,
-            "headers": {"Authorization": f"Bearer {groq_key}"}
+            "body": js_body,
+            "headers": {
+                "Authorization": f"Bearer {groq_key}",
+                "Content-Type": f"multipart/form-data; boundary={boundary}"
+            }
         }, dict_converter=Object.fromEntries)
     )
     raw = await res.text()
@@ -335,15 +374,19 @@ async def on_fetch(request, env):
 
                 # Sesli mesaj kontrolü
                 if "voice" in msg:
-                    file_id = msg["voice"]["file_id"]
-                    file_url = await get_voice_file_url(file_id, TOKEN)
-                    if file_url:
-                        user_text = await transcribe_voice(file_url, GROQ_KEY)
-                        if not user_text:
-                            await send_message(chat_id, "❌ Ses anlaşılamadı, tekrar dener misin?", TOKEN)
+                    try:
+                        file_id = msg["voice"]["file_id"]
+                        file_url = await get_voice_file_url(file_id, TOKEN)
+                        if file_url:
+                            user_text = await transcribe_voice(file_url, GROQ_KEY)
+                            if not user_text:
+                                await send_message(chat_id, "❌ Ses anlaşılamadı, tekrar dener misin?", TOKEN)
+                                return Response.new("OK", status=200)
+                        else:
+                            await send_message(chat_id, "❌ Ses dosyası alınamadı.", TOKEN)
                             return Response.new("OK", status=200)
-                    else:
-                        await send_message(chat_id, "❌ Ses dosyası alınamadı.", TOKEN)
+                    except Exception as voice_err:
+                        await send_message(chat_id, f"🔴 Ses hatası: {type(voice_err).__name__}: {str(voice_err)[:200]}", TOKEN)
                         return Response.new("OK", status=200)
 
                 # Yazılı mesaj
