@@ -2,17 +2,13 @@ from js import Response, fetch, Object, Date
 from pyodide.ffi import to_js
 import json
 
-# JS Date.now() üzerinden gerçek Türkiye saati (UTC+3)
 def get_turkey_time():
     ms = Date.now()
-    total_seconds = int(ms // 1000) + 3 * 3600  # UTC+3
-
+    total_seconds = int(ms // 1000) + 3 * 3600
     days_since_epoch = total_seconds // 86400
     secs_today = total_seconds % 86400
     hour = secs_today // 3600
     minute = (secs_today % 3600) // 60
-
-    # Yıl/ay/gün hesapla
     y, remaining = 1970, days_since_epoch
     while True:
         leap = (y % 4 == 0 and y % 100 != 0) or y % 400 == 0
@@ -21,7 +17,6 @@ def get_turkey_time():
             break
         remaining -= days_in_year
         y += 1
-
     leap = (y % 4 == 0 and y % 100 != 0) or y % 400 == 0
     month_days = [31, 29 if leap else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
     m, d = 1, 1
@@ -31,17 +26,21 @@ def get_turkey_time():
             d = remaining + 1
             break
         remaining -= md
-
-    # 1 Ocak 1970 = Perşembe (index 3)
     day_names = ["Perşembe","Cuma","Cumartesi","Pazar","Pazartesi","Salı","Çarşamba"]
-    day_name = day_names[days_since_epoch % 7]
     month_names = ["","Ocak","Şubat","Mart","Nisan","Mayıs","Haziran",
                    "Temmuz","Ağustos","Eylül","Ekim","Kasım","Aralık"]
+    return f"{day_names[days_since_epoch % 7]} {d} {month_names[m]} {y}, saat {hour:02d}:{minute:02d}"
 
-    return f"{day_name} {d} {month_names[m]} {y}, saat {hour:02d}:{minute:02d}"
+
+def is_weather_query(text):
+    """Hava durumu sorusu mu?"""
+    keywords = ["hava","derece","sıcaklık","yağmur","kar","fırtına","nem","rüzgar","hissedilen"]
+    text_lower = text.lower()
+    return any(k in text_lower for k in keywords)
 
 
 async def needs_search(user_text, groq_key):
+    """Arama gerekli mi?"""
     payload = json.dumps({
         "model": "moonshotai/kimi-k2-instruct",
         "max_tokens": 10,
@@ -50,10 +49,10 @@ async def needs_search(user_text, groq_key):
                 "role": "system",
                 "content": (
                     "Kullanıcının mesajını analiz et. "
-                    "Eğer güncel bilgi, haber, hava durumu, fiyat, spor sonucu gibi "
-                    "gerçek zamanlı internete ihtiyaç duyulan bir soru ise sadece 'EVET' yaz. "
-                    "Selamlama, sohbet, genel bilgi, matematik, fikir soruları için sadece 'HAYIR' yaz. "
-                    "Başka hiçbir şey yazma."
+                    "Güncel haber, hava durumu, fiyat, spor sonucu, borsa, döviz, "
+                    "güncel olay gibi gerçek zamanlı internet gerektiren sorular için 'EVET' yaz. "
+                    "Selamlama, sohbet, genel bilgi, tarih, matematik, fikir, tanım soruları için 'HAYIR' yaz. "
+                    "Sadece EVET veya HAYIR yaz, başka hiçbir şey yazma."
                 )
             },
             {"role": "user", "content": user_text}
@@ -75,7 +74,37 @@ async def needs_search(user_text, groq_key):
     return "EVET" in answer
 
 
+async def serper_search(query, serper_key):
+    """Serper ile Google araması (genel sorgular)."""
+    payload = json.dumps({"q": query, "num": 3, "hl": "tr"})
+    res = await fetch(
+        "https://google.serper.dev/search",
+        to_js({
+            "method": "POST",
+            "body": payload,
+            "headers": {
+                "X-API-KEY": serper_key,
+                "Content-Type": "application/json"
+            }
+        }, dict_converter=Object.fromEntries)
+    )
+    data = json.loads(await res.text())
+    snippets = []
+
+    # Answer box varsa önce onu al
+    if data.get("answerBox"):
+        ab = data["answerBox"]
+        snippets.append(f"Özet: {ab.get('answer') or ab.get('snippet','')}")
+
+    # Organik sonuçlar
+    for r in data.get("organic", [])[:3]:
+        snippets.append(f"- {r.get('title','')}: {r.get('snippet','')} ({r.get('link','')})")
+
+    return "\n".join(snippets) if snippets else None
+
+
 async def tavily_search(query, tavily_key):
+    """Tavily ile hava durumu araması."""
     payload = json.dumps({
         "api_key": tavily_key,
         "query": query,
@@ -98,8 +127,7 @@ async def tavily_search(query, tavily_key):
     if data.get("answer"):
         snippets.append(f"Özet: {data['answer']}")
     for r in data["results"][:3]:
-        content = r.get("content", "")[:400]
-        snippets.append(f"- {r.get('title','')}: {content} ({r.get('url','')})")
+        snippets.append(f"- {r.get('title','')}: {r.get('content','')[:400]} ({r.get('url','')})")
     return "\n".join(snippets)
 
 
@@ -108,6 +136,7 @@ async def on_fetch(request, env):
         TOKEN = str(env.TELEGRAM_BOT_TOKEN).strip()
         GROQ_KEY = str(env.GROQ_API_KEY).strip()
         TAVILY_KEY = str(env.TAVILY_API_KEY).strip()
+        SERPER_KEY = str(env.SERPER_API_KEY).strip()
 
         if request.method == "POST":
             body = json.loads(await request.text())
@@ -117,9 +146,17 @@ async def on_fetch(request, env):
                 user_text = body["message"]["text"]
 
                 current_time = get_turkey_time()
+                search_results = None
 
                 search_needed = await needs_search(user_text, GROQ_KEY)
-                search_results = await tavily_search(user_text, TAVILY_KEY) if search_needed else None
+
+                if search_needed:
+                    if is_weather_query(user_text):
+                        # Hava durumu → Tavily (daha doğru)
+                        search_results = await tavily_search(user_text, TAVILY_KEY)
+                    else:
+                        # Genel arama → Serper (2500 ücretsiz)
+                        search_results = await serper_search(user_text, SERPER_KEY)
 
                 base_prompt = (
                     "Sen Fedra adında zeki bir yapay zeka asistanısın. "
