@@ -73,7 +73,7 @@ async def needs_search(user_text, groq_key):
 
 
 async def serper_search(query, serper_key):
-    payload = json.dumps({"q": query, "num": 3, "hl": "tr"})
+    payload = json.dumps({"q": query, "num": 5, "hl": "tr"})
     res = await fetch(
         "https://google.serper.dev/search",
         to_js({
@@ -87,16 +87,33 @@ async def serper_search(query, serper_key):
     )
     data = json.loads(await res.text())
     snippets = []
+
+    # Answer box — en özet bilgi
     if data.get("answerBox"):
         ab = data["answerBox"]
-        snippets.append(f"Özet: {ab.get('answer') or ab.get('snippet','')}")
-    # Spor sonuçları varsa
+        answer = ab.get("answer") or ab.get("snippet") or ab.get("snippetHighlighted","")
+        if answer:
+            snippets.append(f"Özet: {answer}")
+
+    # Spor sonuçları — maç skoru varsa detaylı al
     if data.get("sportsResults"):
         sr = data["sportsResults"]
-        snippets.append(f"Spor: {json.dumps(sr, ensure_ascii=False)[:400]}")
-    for r in data.get("organic", [])[:3]:
-        # Sadece snippet al, link ekleme
+        title = sr.get("title","")
+        game_spotlight = sr.get("gameSpotlight", {})
+        if game_spotlight:
+            home = game_spotlight.get("homeTeam", {})
+            away = game_spotlight.get("awayTeam", {})
+            snippets.append(
+                f"Maç: {home.get('name','')} {home.get('score','')} - "
+                f"{away.get('score','')} {away.get('name','')} | {title}"
+            )
+        else:
+            snippets.append(f"Spor: {json.dumps(sr, ensure_ascii=False)[:400]}")
+
+    # Organik sonuçlar
+    for r in data.get("organic", [])[:4]:
         snippets.append(f"- {r.get('title','')}: {r.get('snippet','')}")
+
     return "\n".join(snippets) if snippets else None
 
 
