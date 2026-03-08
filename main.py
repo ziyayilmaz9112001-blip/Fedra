@@ -71,29 +71,21 @@ async def get_voice_file_url(file_id, token):
 
 
 async def transcribe_voice(file_url, groq_key):
-    """Groq Whisper ile sesi metne çevir."""
-    # Ses dosyasını indir
+    """Groq Whisper ile sesi metne çevir — URL üzerinden."""
+    # Ses dosyasını binary olarak indir
     audio_res = await fetch(
         file_url,
         to_js({"method": "GET"}, dict_converter=Object.fromEntries)
     )
     audio_bytes = await audio_res.arrayBuffer()
 
-    # Groq Whisper'a gönder (multipart/form-data)
-    form_data_script = """
-    const formData = new FormData();
-    const blob = new Blob([audioBuffer], { type: 'audio/ogg' });
-    formData.append('file', blob, 'voice.ogg');
-    formData.append('model', 'whisper-large-v3-turbo');
-    formData.append('language', 'tr');
-    formData.append('response_format', 'json');
-    return formData;
-    """
-
-    # JS FormData oluştur
-    from js import FormData, Blob, Array
+    # JS tarafında FormData oluştur
+    from js import FormData, Blob
     form = FormData.new()
-    blob = Blob.new([audio_bytes], to_js({"type": "audio/ogg"}, dict_converter=Object.fromEntries))
+    blob = Blob.new(
+        [audio_bytes],
+        to_js({"type": "audio/ogg; codecs=opus"}, dict_converter=Object.fromEntries)
+    )
     form.append("file", blob, "voice.ogg")
     form.append("model", "whisper-large-v3-turbo")
     form.append("language", "tr")
@@ -104,12 +96,11 @@ async def transcribe_voice(file_url, groq_key):
         to_js({
             "method": "POST",
             "body": form,
-            "headers": {
-                "Authorization": f"Bearer {groq_key}"
-            }
+            "headers": {"Authorization": f"Bearer {groq_key}"}
         }, dict_converter=Object.fromEntries)
     )
-    data = json.loads(await res.text())
+    raw = await res.text()
+    data = json.loads(raw)
     return data.get("text", "").strip()
 
 
@@ -344,7 +335,6 @@ async def on_fetch(request, env):
 
                 # Sesli mesaj kontrolü
                 if "voice" in msg:
-                    await send_message(chat_id, "🎙️ Ses mesajın alındı, çeviriliyor...", TOKEN)
                     file_id = msg["voice"]["file_id"]
                     file_url = await get_voice_file_url(file_id, TOKEN)
                     if file_url:
