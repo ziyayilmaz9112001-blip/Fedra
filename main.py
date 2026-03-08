@@ -108,7 +108,7 @@ async def tavily_search(query, tavily_key):
     payload = json.dumps({
         "api_key": tavily_key,
         "query": query,
-        "search_depth": "advanced",
+        "search_depth": "basic",
         "max_results": 3,
         "include_answer": True
     })
