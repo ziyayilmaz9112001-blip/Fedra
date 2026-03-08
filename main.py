@@ -37,6 +37,24 @@ def is_weather_query(text):
     return any(k in text.lower() for k in keywords)
 
 
+def serper_result_quality(data):
+    """Serper sonucunun kalitesini puanla (0-3)."""
+    score = 0
+    if data.get("answerBox"):
+        score += 2
+    if data.get("sportsResults") and data["sportsResults"].get("gameSpotlight"):
+        score += 2
+    organics = data.get("organic", [])
+    if organics:
+        score += 1
+    # Snippet'ler çok kısaysa düşük kalite
+    snippets = [r.get("snippet","") for r in organics[:3]]
+    avg_len = sum(len(s) for s in snippets) / max(len(snippets), 1)
+    if avg_len < 50:
+        score -= 1
+    return score
+
+
 async def needs_search(user_text, groq_key):
     payload = json.dumps({
         "model": "moonshotai/kimi-k2-instruct",
@@ -73,6 +91,7 @@ async def needs_search(user_text, groq_key):
 
 
 async def serper_search(query, serper_key):
+    """Google sonuçları — 2500/ay ücretsiz."""
     payload = json.dumps({"q": query, "num": 5, "hl": "tr"})
     res = await fetch(
         "https://google.serper.dev/search",
@@ -86,38 +105,35 @@ async def serper_search(query, serper_key):
         }, dict_converter=Object.fromEntries)
     )
     data = json.loads(await res.text())
-    snippets = []
+    quality = serper_result_quality(data)
 
-    # Answer box — en özet bilgi
+    snippets = []
     if data.get("answerBox"):
         ab = data["answerBox"]
-        answer = ab.get("answer") or ab.get("snippet") or ab.get("snippetHighlighted","")
+        answer = ab.get("answer") or ab.get("snippet") or ""
         if answer:
             snippets.append(f"Özet: {answer}")
-
-    # Spor sonuçları — maç skoru varsa detaylı al
     if data.get("sportsResults"):
         sr = data["sportsResults"]
-        title = sr.get("title","")
-        game_spotlight = sr.get("gameSpotlight", {})
-        if game_spotlight:
-            home = game_spotlight.get("homeTeam", {})
-            away = game_spotlight.get("awayTeam", {})
+        gs = sr.get("gameSpotlight", {})
+        if gs:
+            home = gs.get("homeTeam", {})
+            away = gs.get("awayTeam", {})
             snippets.append(
                 f"Maç: {home.get('name','')} {home.get('score','')} - "
-                f"{away.get('score','')} {away.get('name','')} | {title}"
+                f"{away.get('score','')} {away.get('name','')} | {sr.get('title','')}"
             )
         else:
             snippets.append(f"Spor: {json.dumps(sr, ensure_ascii=False)[:400]}")
-
-    # Organik sonuçlar
     for r in data.get("organic", [])[:4]:
         snippets.append(f"- {r.get('title','')}: {r.get('snippet','')}")
 
-    return "\n".join(snippets) if snippets else None
+    result = "\n".join(snippets) if snippets else None
+    return result, quality
 
 
 async def tavily_search(query, tavily_key):
+    """Hava durumu ve Serper yedek — 1000/ay ücretsiz."""
     payload = json.dumps({
         "api_key": tavily_key,
         "query": query,
@@ -141,7 +157,59 @@ async def tavily_search(query, tavily_key):
         snippets.append(f"Özet: {data['answer']}")
     for r in data["results"][:3]:
         snippets.append(f"- {r.get('title','')}: {r.get('content','')[:400]}")
-    return "\n".join(snippets)
+    return "\n".join(snippets) if snippets else None
+
+
+async def duckduckgo_search(query):
+    """DuckDuckGo Instant Answer — tamamen ücretsiz, key gerekmez."""
+    encoded = query.replace(" ", "+")
+    res = await fetch(
+        f"https://api.duckduckgo.com/?q={encoded}&format=json&no_html=1&skip_disambig=1",
+        to_js({
+            "method": "GET",
+            "headers": {"Accept": "application/json"}
+        }, dict_converter=Object.fromEntries)
+    )
+    data = json.loads(await res.text())
+    snippets = []
+    if data.get("AbstractText"):
+        snippets.append(f"Özet: {data['AbstractText']}")
+    for r in data.get("RelatedTopics", [])[:3]:
+        if isinstance(r, dict) and r.get("Text"):
+            snippets.append(f"- {r['Text'][:200]}")
+    return "\n".join(snippets) if snippets else None
+
+
+async def smart_search(query, serper_key, tavily_key, is_weather):
+    """
+    Akıllı arama zinciri:
+    Hava durumu → Tavily
+    Diğer → Serper (kalite düşükse → Tavily → DuckDuckGo)
+    """
+    if is_weather:
+        result = await tavily_search(query, tavily_key)
+        return result, "Tavily"
+
+    # Önce Serper dene
+    result, quality = await serper_search(query, serper_key)
+
+    if quality >= 2:
+        return result, "Serper"
+
+    # Serper zayıfsa Tavily'e geç
+    tavily_result = await tavily_search(query, tavily_key)
+    if tavily_result:
+        # İkisini birleştir
+        combined = (result or "") + "\n\n[Ek kaynak]\n" + tavily_result
+        return combined.strip(), "Serper+Tavily"
+
+    # İkisi de zayıfsa DuckDuckGo
+    ddg_result = await duckduckgo_search(query)
+    if ddg_result:
+        combined = (result or "") + "\n\n[Ek kaynak]\n" + ddg_result
+        return combined.strip(), "Serper+DDG"
+
+    return result, "Serper"
 
 
 async def on_fetch(request, env):
@@ -160,21 +228,24 @@ async def on_fetch(request, env):
 
                 current_time = get_turkey_time()
                 search_results = None
+                search_source = None
 
                 search_needed = await needs_search(user_text, GROQ_KEY)
 
                 if search_needed:
-                    if is_weather_query(user_text):
-                        search_results = await tavily_search(user_text, TAVILY_KEY)
-                    else:
-                        search_results = await serper_search(user_text, SERPER_KEY)
+                    weather = is_weather_query(user_text)
+                    search_results, search_source = await smart_search(
+                        user_text, SERPER_KEY, TAVILY_KEY, weather
+                    )
 
                 base_prompt = (
                     "Sen Fedra adında zeki bir yapay zeka asistanısın. "
                     "Sadece soran olursa: Seni Ziya Yılmaz geliştirdi, adın Fedra. "
                     "Sorulmadıkça kendini tanıtma. "
                     "Her zaman yalnızca düzgün Türkçe kullan, başka dil karakteri karıştırma. "
-                    "ASLA link veya URL paylaşma. Bilgiyi doğrudan ve net şekilde söyle. "
+                    "ASLA link veya URL paylaşma. Bilgiyi doğrudan ve net söyle. "
+                    "Eğer arama sonuçları yetersiz veya çelişkiliyse, bunu dürüstçe belirt; "
+                    "kesinlikle bilgi uydurmа veya tahmin yürütme.\n"
                     f"Şu anki tarih ve saat (Türkiye): {current_time}\n"
                 )
 
