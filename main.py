@@ -37,22 +37,52 @@ def is_weather_query(text):
     return any(k in text.lower() for k in keywords)
 
 
-def serper_result_quality(data):
-    """Serper sonucunun kalitesini puanla (0-3)."""
-    score = 0
-    if data.get("answerBox"):
-        score += 2
-    if data.get("sportsResults") and data["sportsResults"].get("gameSpotlight"):
-        score += 2
-    organics = data.get("organic", [])
-    if organics:
-        score += 1
-    # Snippet'ler çok kısaysa düşük kalite
-    snippets = [r.get("snippet","") for r in organics[:3]]
-    avg_len = sum(len(s) for s in snippets) / max(len(snippets), 1)
-    if avg_len < 50:
-        score -= 1
-    return score
+def detect_crypto(text):
+    """Hangi kripto soruluyor? coin_id döndür."""
+    t = text.lower()
+    coins = {
+        "bitcoin": "bitcoin", "btc": "bitcoin",
+        "ethereum": "ethereum", "eth": "ethereum",
+        "solana": "solana", "sol": "solana",
+        "ripple": "ripple", "xrp": "ripple",
+        "dogecoin": "dogecoin", "doge": "dogecoin",
+        "bnb": "binancecoin", "binance": "binancecoin",
+        "cardano": "cardano", "ada": "cardano",
+        "avalanche": "avalanche-2", "avax": "avalanche-2",
+        "polkadot": "polkadot", "dot": "polkadot",
+        "litecoin": "litecoin", "ltc": "litecoin",
+    }
+    for keyword, coin_id in coins.items():
+        if keyword in t:
+            return coin_id
+    return None
+
+
+async def coingecko_price(coin_id):
+    """CoinGecko anlık fiyat — ücretsiz, key gerekmez."""
+    res = await fetch(
+        f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd,try&include_24hr_change=true",
+        to_js({
+            "method": "GET",
+            "headers": {"Accept": "application/json"}
+        }, dict_converter=Object.fromEntries)
+    )
+    data = json.loads(await res.text())
+    if coin_id not in data:
+        return None
+    d = data[coin_id]
+    usd = d.get("usd", 0)
+    try_price = d.get("try", 0)
+    change = d.get("usd_24h_change", 0)
+    change_str = f"+{change:.2f}%" if change >= 0 else f"{change:.2f}%"
+    name_map = {
+        "bitcoin": "Bitcoin", "ethereum": "Ethereum", "solana": "Solana",
+        "ripple": "XRP", "dogecoin": "Dogecoin", "binancecoin": "BNB",
+        "cardano": "Cardano", "avalanche-2": "Avalanche", "polkadot": "Polkadot",
+        "litecoin": "Litecoin"
+    }
+    name = name_map.get(coin_id, coin_id)
+    return f"{name} anlık fiyatı: ${usd:,.2f} USD / {try_price:,.0f} TL (24s değişim: {change_str})"
 
 
 async def needs_search(user_text, groq_key):
@@ -65,9 +95,9 @@ async def needs_search(user_text, groq_key):
                 "content": (
                     "Kullanıcının mesajını analiz et. "
                     "Şu sorular için KESİNLİKLE 'HAYIR' yaz: tarih, saat, gün, selamlama, "
-                    "sohbet, genel bilgi, matematik, fikir, tanım, kim olduğun. "
+                    "sohbet, genel bilgi, matematik, fikir, tanım, kim olduğun, kripto fiyatı. "
                     "Yalnızca şunlar için 'EVET' yaz: hava durumu, güncel haber, "
-                    "spor sonucu, borsa, döviz kuru, fiyat, seçim sonuçları. "
+                    "spor sonucu, borsa, döviz kuru, altın fiyatı, seçim sonuçları. "
                     "Sadece EVET veya HAYIR yaz, başka hiçbir şey yazma."
                 )
             },
@@ -90,8 +120,23 @@ async def needs_search(user_text, groq_key):
     return "EVET" in answer
 
 
+def serper_result_quality(data):
+    score = 0
+    if data.get("answerBox"):
+        score += 2
+    if data.get("sportsResults") and data["sportsResults"].get("gameSpotlight"):
+        score += 2
+    organics = data.get("organic", [])
+    if organics:
+        score += 1
+    snippets = [r.get("snippet","") for r in organics[:3]]
+    avg_len = sum(len(s) for s in snippets) / max(len(snippets), 1)
+    if avg_len < 50:
+        score -= 1
+    return score
+
+
 async def serper_search(query, serper_key):
-    """Google sonuçları — 2500/ay ücretsiz."""
     payload = json.dumps({"q": query, "num": 5, "hl": "tr"})
     res = await fetch(
         "https://google.serper.dev/search",
@@ -106,7 +151,6 @@ async def serper_search(query, serper_key):
     )
     data = json.loads(await res.text())
     quality = serper_result_quality(data)
-
     snippets = []
     if data.get("answerBox"):
         ab = data["answerBox"]
@@ -127,13 +171,11 @@ async def serper_search(query, serper_key):
             snippets.append(f"Spor: {json.dumps(sr, ensure_ascii=False)[:400]}")
     for r in data.get("organic", [])[:4]:
         snippets.append(f"- {r.get('title','')}: {r.get('snippet','')}")
-
     result = "\n".join(snippets) if snippets else None
     return result, quality
 
 
 async def tavily_search(query, tavily_key):
-    """Hava durumu ve Serper yedek — 1000/ay ücretsiz."""
     payload = json.dumps({
         "api_key": tavily_key,
         "query": query,
@@ -161,7 +203,6 @@ async def tavily_search(query, tavily_key):
 
 
 async def duckduckgo_search(query):
-    """DuckDuckGo Instant Answer — tamamen ücretsiz, key gerekmez."""
     encoded = query.replace(" ", "+")
     res = await fetch(
         f"https://api.duckduckgo.com/?q={encoded}&format=json&no_html=1&skip_disambig=1",
@@ -181,35 +222,25 @@ async def duckduckgo_search(query):
 
 
 async def smart_search(query, serper_key, tavily_key, is_weather):
-    """
-    Akıllı arama zinciri:
-    Hava durumu → Tavily
-    Diğer → Serper (kalite düşükse → Tavily → DuckDuckGo)
-    """
     if is_weather:
         result = await tavily_search(query, tavily_key)
-        return result, "Tavily"
+        return result
 
-    # Önce Serper dene
     result, quality = await serper_search(query, serper_key)
-
     if quality >= 2:
-        return result, "Serper"
+        return result
 
-    # Serper zayıfsa Tavily'e geç
     tavily_result = await tavily_search(query, tavily_key)
     if tavily_result:
-        # İkisini birleştir
         combined = (result or "") + "\n\n[Ek kaynak]\n" + tavily_result
-        return combined.strip(), "Serper+Tavily"
+        return combined.strip()
 
-    # İkisi de zayıfsa DuckDuckGo
     ddg_result = await duckduckgo_search(query)
     if ddg_result:
         combined = (result or "") + "\n\n[Ek kaynak]\n" + ddg_result
-        return combined.strip(), "Serper+DDG"
+        return combined.strip()
 
-    return result, "Serper"
+    return result
 
 
 async def on_fetch(request, env):
@@ -228,15 +259,20 @@ async def on_fetch(request, env):
 
                 current_time = get_turkey_time()
                 search_results = None
-                search_source = None
 
-                search_needed = await needs_search(user_text, GROQ_KEY)
-
-                if search_needed:
-                    weather = is_weather_query(user_text)
-                    search_results, search_source = await smart_search(
-                        user_text, SERPER_KEY, TAVILY_KEY, weather
-                    )
+                # Önce kripto kontrolü — CoinGecko anlık veri
+                coin_id = detect_crypto(user_text)
+                if coin_id:
+                    crypto_data = await coingecko_price(coin_id)
+                    if crypto_data:
+                        search_results = crypto_data
+                else:
+                    search_needed = await needs_search(user_text, GROQ_KEY)
+                    if search_needed:
+                        weather = is_weather_query(user_text)
+                        search_results = await smart_search(
+                            user_text, SERPER_KEY, TAVILY_KEY, weather
+                        )
 
                 base_prompt = (
                     "Sen Fedra adında zeki bir yapay zeka asistanısın. "
@@ -244,14 +280,14 @@ async def on_fetch(request, env):
                     "Sorulmadıkça kendini tanıtma. "
                     "Her zaman yalnızca düzgün Türkçe kullan, başka dil karakteri karıştırma. "
                     "ASLA link veya URL paylaşma. Bilgiyi doğrudan ve net söyle. "
-                    "Eğer arama sonuçları yetersiz veya çelişkiliyse, bunu dürüstçe belirt; "
-                    "kesinlikle bilgi uydurmа veya tahmin yürütme.\n"
+                    "Eğer arama sonuçları yetersiz veya çelişkiliyse bunu dürüstçe belirt; "
+                    "kesinlikle bilgi uydurma veya tahmin yürütme.\n"
                     f"Şu anki tarih ve saat (Türkiye): {current_time}\n"
                 )
 
                 system_content = (
                     base_prompt +
-                    "Aşağıdaki güncel web arama sonuçlarına dayanarak cevap ver:\n\n" + search_results
+                    "Aşağıdaki güncel veriye dayanarak cevap ver:\n\n" + search_results
                     if search_results else base_prompt
                 )
 
