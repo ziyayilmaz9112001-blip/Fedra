@@ -33,14 +33,11 @@ def get_turkey_time():
 
 
 def is_weather_query(text):
-    """Hava durumu sorusu mu?"""
     keywords = ["hava","derece","sıcaklık","yağmur","kar","fırtına","nem","rüzgar","hissedilen"]
-    text_lower = text.lower()
-    return any(k in text_lower for k in keywords)
+    return any(k in text.lower() for k in keywords)
 
 
 async def needs_search(user_text, groq_key):
-    """Arama gerekli mi?"""
     payload = json.dumps({
         "model": "moonshotai/kimi-k2-instruct",
         "max_tokens": 10,
@@ -49,9 +46,10 @@ async def needs_search(user_text, groq_key):
                 "role": "system",
                 "content": (
                     "Kullanıcının mesajını analiz et. "
-                    "Güncel haber, hava durumu, fiyat, spor sonucu, borsa, döviz, "
-                    "güncel olay gibi gerçek zamanlı internet gerektiren sorular için 'EVET' yaz. "
-                    "Selamlama, sohbet, genel bilgi, tarih, matematik, fikir, tanım soruları için 'HAYIR' yaz. "
+                    "Şu sorular için KESİNLİKLE 'HAYIR' yaz: tarih, saat, gün, selamlama, "
+                    "sohbet, genel bilgi, matematik, fikir, tanım, kim olduğun. "
+                    "Yalnızca şunlar için 'EVET' yaz: hava durumu, güncel haber, "
+                    "spor sonucu, borsa, döviz kuru, fiyat, seçim sonuçları. "
                     "Sadece EVET veya HAYIR yaz, başka hiçbir şey yazma."
                 )
             },
@@ -75,7 +73,6 @@ async def needs_search(user_text, groq_key):
 
 
 async def serper_search(query, serper_key):
-    """Serper ile Google araması (genel sorgular)."""
     payload = json.dumps({"q": query, "num": 3, "hl": "tr"})
     res = await fetch(
         "https://google.serper.dev/search",
@@ -90,21 +87,20 @@ async def serper_search(query, serper_key):
     )
     data = json.loads(await res.text())
     snippets = []
-
-    # Answer box varsa önce onu al
     if data.get("answerBox"):
         ab = data["answerBox"]
         snippets.append(f"Özet: {ab.get('answer') or ab.get('snippet','')}")
-
-    # Organik sonuçlar
+    # Spor sonuçları varsa
+    if data.get("sportsResults"):
+        sr = data["sportsResults"]
+        snippets.append(f"Spor: {json.dumps(sr, ensure_ascii=False)[:400]}")
     for r in data.get("organic", [])[:3]:
-        snippets.append(f"- {r.get('title','')}: {r.get('snippet','')} ({r.get('link','')})")
-
+        # Sadece snippet al, link ekleme
+        snippets.append(f"- {r.get('title','')}: {r.get('snippet','')}")
     return "\n".join(snippets) if snippets else None
 
 
 async def tavily_search(query, tavily_key):
-    """Tavily ile hava durumu araması."""
     payload = json.dumps({
         "api_key": tavily_key,
         "query": query,
@@ -127,7 +123,7 @@ async def tavily_search(query, tavily_key):
     if data.get("answer"):
         snippets.append(f"Özet: {data['answer']}")
     for r in data["results"][:3]:
-        snippets.append(f"- {r.get('title','')}: {r.get('content','')[:400]} ({r.get('url','')})")
+        snippets.append(f"- {r.get('title','')}: {r.get('content','')[:400]}")
     return "\n".join(snippets)
 
 
@@ -152,17 +148,16 @@ async def on_fetch(request, env):
 
                 if search_needed:
                     if is_weather_query(user_text):
-                        # Hava durumu → Tavily (daha doğru)
                         search_results = await tavily_search(user_text, TAVILY_KEY)
                     else:
-                        # Genel arama → Serper (2500 ücretsiz)
                         search_results = await serper_search(user_text, SERPER_KEY)
 
                 base_prompt = (
                     "Sen Fedra adında zeki bir yapay zeka asistanısın. "
                     "Sadece soran olursa: Seni Ziya Yılmaz geliştirdi, adın Fedra. "
                     "Sorulmadıkça kendini tanıtma. "
-                    "Her zaman yalnızca düzgün Türkçe kullan, başka dil karakteri karıştırma.\n"
+                    "Her zaman yalnızca düzgün Türkçe kullan, başka dil karakteri karıştırma. "
+                    "ASLA link veya URL paylaşma. Bilgiyi doğrudan ve net şekilde söyle. "
                     f"Şu anki tarih ve saat (Türkiye): {current_time}\n"
                 )
 
