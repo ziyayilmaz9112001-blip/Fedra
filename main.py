@@ -58,31 +58,44 @@ def detect_crypto(text):
     return None
 
 
-async def coingecko_price(coin_id):
-    """CoinGecko anlık fiyat — ücretsiz, key gerekmez."""
-    res = await fetch(
-        f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd,try&include_24hr_change=true",
-        to_js({
-            "method": "GET",
-            "headers": {"Accept": "application/json"}
-        }, dict_converter=Object.fromEntries)
-    )
-    data = json.loads(await res.text())
-    if coin_id not in data:
-        return None
-    d = data[coin_id]
-    usd = d.get("usd", 0)
-    try_price = d.get("try", 0)
-    change = d.get("usd_24h_change", 0)
-    change_str = f"+{change:.2f}%" if change >= 0 else f"{change:.2f}%"
-    name_map = {
-        "bitcoin": "Bitcoin", "ethereum": "Ethereum", "solana": "Solana",
-        "ripple": "XRP", "dogecoin": "Dogecoin", "binancecoin": "BNB",
-        "cardano": "Cardano", "avalanche-2": "Avalanche", "polkadot": "Polkadot",
-        "litecoin": "Litecoin"
+async def binance_price(coin_id):
+    """Binance anlık fiyat — ücretsiz, key gerekmez."""
+    symbol_map = {
+        "bitcoin": ("BTCUSDT", "Bitcoin"),
+        "ethereum": ("ETHUSDT", "Ethereum"),
+        "solana": ("SOLUSDT", "Solana"),
+        "ripple": ("XRPUSDT", "XRP"),
+        "dogecoin": ("DOGEUSDT", "Dogecoin"),
+        "binancecoin": ("BNBUSDT", "BNB"),
+        "cardano": ("ADAUSDT", "Cardano"),
+        "avalanche-2": ("AVAXUSDT", "Avalanche"),
+        "polkadot": ("DOTUSDT", "Polkadot"),
+        "litecoin": ("LTCUSDT", "Litecoin"),
     }
-    name = name_map.get(coin_id, coin_id)
-    return f"{name} anlık fiyatı: ${usd:,.2f} USD / {try_price:,.0f} TL (24s değişim: {change_str})"
+    if coin_id not in symbol_map:
+        return None
+    symbol, name = symbol_map[coin_id]
+
+    # Anlık fiyat
+    res_price = await fetch(
+        f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}",
+        to_js({"method": "GET"}, dict_converter=Object.fromEntries)
+    )
+    price_data = json.loads(await res_price.text())
+    if "price" not in price_data:
+        return None
+    usd = float(price_data["price"])
+
+    # 24s değişim
+    res_change = await fetch(
+        f"https://api.binance.com/api/v3/ticker/24hr?symbol={symbol}",
+        to_js({"method": "GET"}, dict_converter=Object.fromEntries)
+    )
+    change_data = json.loads(await res_change.text())
+    change = float(change_data.get("priceChangePercent", 0))
+    change_str = f"+{change:.2f}%" if change >= 0 else f"{change:.2f}%"
+
+    return f"{name} anlık fiyatı: ${usd:,.2f} USD (24s değişim: {change_str})"
 
 
 async def needs_search(user_text, groq_key):
@@ -263,7 +276,7 @@ async def on_fetch(request, env):
                 # Önce kripto kontrolü — CoinGecko anlık veri
                 coin_id = detect_crypto(user_text)
                 if coin_id:
-                    crypto_data = await coingecko_price(coin_id)
+                    crypto_data = await binance_price(coin_id)
                     if crypto_data:
                         search_results = crypto_data
                 else:
