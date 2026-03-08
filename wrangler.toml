@@ -5,5 +5,5 @@ compatibility_flags = ["python_workers"]
 
 [vars]
 TELEGRAM_BOT_TOKEN = "8294696946:AAE_AAfoilyktfUKRpR8QFquClbPxrOLE44"
-GROQ_API_KEY = "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" # Buraya senin anahtarın gelecek
-
+GROQ_API_KEY = "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"
+TAVILY_API_KEY = "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"
