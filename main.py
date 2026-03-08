@@ -134,7 +134,7 @@ async def transcribe_voice(file_url, groq_key):
             "body": js_body,
             "headers": {
                 "Authorization": f"Bearer {groq_key}",
-                "Content-Type": f"multipart/form-data; boundary={boundary}"
+                "Content-Type": "multipart/form-data; boundary=" + boundary
             }
         }, dict_converter=Object.fromEntries)
     )
